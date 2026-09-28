@@ -156,6 +156,7 @@ chore: 构建/工具变更
 app.py / main.py
   → CellSpatioAgent.execute_workflow
     → AgentRuntime.execute（tool-calling；无 LLM/异常回退旧路径）
+        → run_analysis 分支：_skill_plan → ModalRouter.route() 取分析技能静态方案挂 params["skill_plan"]（技能 setup→execute→teardown，teardown 写 KGMemory；任何失败降级 None 不阻断）
         → WorkflowManager.run_analysis_for_agent / search_datasets_for_agent / query_knowledge_for_agent
         → WorkflowRecorder 记录 intent/params/steps/outputs
         → WRROCStore.persist() → `.wrroc/<run_id>/workflow.json`
