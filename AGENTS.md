@@ -26,7 +26,7 @@
 
 | 层 | 技术 |
 |---|------|
-| UI | Python + Streamlit |
+| UI | FastAPI + React 18 + Vite + TS + Tailwind 4 |
 | 控制层 | Python |
 | 知识检索 | LightRAG (GraphRAG) |
 | 分析层 | R via 子进程 (subprocess Rscript) |
@@ -43,7 +43,7 @@
 pip install -r requirements.txt
 
 # 启动应用
-streamlit run src/ui/app.py
+python -m src.api
 ```
 
 ## 目录结构
@@ -52,12 +52,18 @@ streamlit run src/ui/app.py
 cellspatio-agent/
 ├── src/                    # Python 源码
 │   ├── main.py             # 入口
-│   ├── ui/                 # Streamlit 界面
+│   ├── ui/                 # 仅 session_store.py（会话持久化，被 API 层复用）
 │   ├── control/            # 控制层（意图解析、流程管理、R脚本生成、KG Memory、Skill 路由）
 │   ├── skills/             # 技能平台（Manifest/Base/Registry/Loader）
 │   ├── knowledge/          # 知识检索（LightRAG）
 │   ├── analysis/           # R 分析执行器
 │   └── data/               # 数据层（Fetcher/Registry/Storage/Loader）
+├── web/                    # React 18 前端（Vite + TS + Tailwind 4）
+│   ├── src/pages/          # 页面（ChatPage 对话页）
+│   ├── src/components/     # 组件（Sidebar/MessageList/ConfirmCard/ChartBlock）
+│   ├── src/lib/            # API/SSE 客户端与类型
+│   ├── src/store/          # 状态（zustand chat store）
+│   └── dist/               # 构建产物（npm run build，FastAPI 挂到 /）
 ├── pubmed-etl/             # 独立文献处理工具（单细胞+时空方向）
 ├── tests/                  # 测试
 │   ├── unit/
@@ -94,6 +100,12 @@ python -m pytest tests/integration/ -v
 
 # 运行所有测试
 python -m pytest tests/ -v
+
+# 前端门禁（web/）
+cd web
+npm run test        # vitest 单测
+npm run typecheck   # tsc --noEmit
+npm run build       # vite 构建到 dist/
 ```
 
 ## 提交规范
@@ -125,7 +137,11 @@ chore: 构建/工具变更
 
 | 入口 | 路径 | 说明 |
 |---|---|---|
-| Streamlit Web | `src/ui/app.py` (`create_app`) | `streamlit run src/ui/app.py` |
+| **Web 服务** | `src/api/__main__.py` (`main`) | `python -m src.api`（端口 8600，`web/dist` 存在时挂到 `/`） |
+| **SSE 对话** | `src/api/routes_chat.py` (`chat`) | `POST /api/chat`，SSE 流式（delta/tool_status/confirm_card/chart → done） |
+| **脚本确认** | `src/api/routes_sessions.py` (`confirm`) | `POST /api/confirm`，script_confirm / script_cancel / data_confirm |
+| **侧栏状态** | `src/api/routes_meta.py` (`sidebar`) | `GET /api/sidebar`，kb_stats + env（rscript/kb_path/ollama）+ soft_warn |
+| **前端入口** | `web/src/pages/ChatPage.tsx` | 对话主页面（`web/dist` 由 FastAPI StaticFiles 托管） |
 | CLI / 主类 | `src/main.py` (`CellSpatioAgent`) | `python -m src.main` |
 | 工具路由运行时 | `src/control/agent_runtime.py` (`AgentRuntime.execute`) | 主入口；失败回退 `IntentParser` |
 | 工具 Schema | `src/control/tools.py` (`TOOL_SCHEMAS`) | run_analysis / search_datasets / query_knowledge |
@@ -153,16 +169,18 @@ chore: 构建/工具变更
 ### 主调用链
 
 ```
-app.py / main.py
-  → CellSpatioAgent.execute_workflow
-    → AgentRuntime.execute（tool-calling；无 LLM/异常回退旧路径）
+src/api/app.py / main.py
+  → POST /api/chat → src/api/chat_service.run_turn
+    → AgentRuntime.execute(on_event=emit)（tool-calling；无 LLM/异常回退旧路径）
+        → emit SSE 事件（delta/tool_status/confirm_card/chart → done）→ web/src/lib/sse.ts → store/chat.ts dispatch
         → run_analysis 分支：_skill_plan → ModalRouter.route() 取分析技能静态方案挂 params["skill_plan"]（技能 setup→execute→teardown，teardown 写 KGMemory；任何失败降级 None 不阻断）
         → WorkflowManager.run_analysis_for_agent / search_datasets_for_agent / query_knowledge_for_agent
         → WorkflowRecorder 记录 intent/params/steps/outputs
         → WRROCStore.persist() → `.wrroc/<run_id>/workflow.json`
         → SnapshotManager.create_snapshot() → `snapshots/<run_id>/` worktree
-        → 终态（success / needs_* / error）直接返回 UI
+        → 终态（success / needs_* / error）经 SSE 返回前端
         → 无工具调用 → general_response
+  （CLI 路径）CellSpatioAgent.execute_workflow → AgentRuntime.execute
 
 # 复现链路
 python -m src.cli.replay <run_id>
@@ -184,4 +202,9 @@ WorkflowRecorder.finish_run()
 - `.omo/` `.codegraph/` `.worktrees/` `.ruff_cache/` `.pytest_cache/` `__pycache__/` — 工具缓存
 - `knowledge_base/` `data/cache/` `pubmed-etl/data/` — 运行时数据
 - `*.log` `.env` — 日志与密钥
+- `web/node_modules/` `web/dist/` — 前端依赖与构建产物
 - R 分析逻辑统一由 `src/control/r_script_generator.py` 生成（原 `r_scripts/` 已移除）
+
+### 排查约定（事故沉淀）
+
+- **Ollama 模型**：查 Ollama 模型是否存在，一律以 `GET /api/tags` 为准，禁止推断 `~/.ollama/models` 或 `OLLAMA_MODELS` 路径；模型目录由服务端环境变量决定，改目录后必须重启 ollama 服务。
