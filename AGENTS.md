@@ -208,3 +208,4 @@ WorkflowRecorder.finish_run()
 ### 排查约定（事故沉淀）
 
 - **Ollama 模型**：查 Ollama 模型是否存在，一律以 `GET /api/tags` 为准，禁止推断 `~/.ollama/models` 或 `OLLAMA_MODELS` 路径；模型目录由服务端环境变量决定，改目录后必须重启 ollama 服务。
+- **Ollama 首轮等待**：等待的大头是「拉起 ollama serve」（实测约 4.2s，占 70%），不是模型加载（约 1.8s）。`OLLAMA_EAGER_START=1` 让 `src/api/app.py:create_app` 在后台线程预热，并把空闲自动关闭阈值归零（`ollama_runtime._idle_seconds`）——否则空闲后又被关掉，预热白做。`status()` 的三键契约锁定，启动模式走独立访问器 `start_mode()`，在 `/api/sidebar` 的 `env.ollama_start_mode` 作兄弟字段暴露，**不得**塞进 `ollama` 里。
